@@ -11,6 +11,7 @@ import contextlib
 import ctypes
 import datetime
 import email.utils
+import email.header
 import errno
 import functools
 import gzip
@@ -21,7 +22,6 @@ import locale
 import math
 import operator
 import os
-import pipes
 import platform
 import random
 import re
@@ -35,10 +35,13 @@ import xml.etree.ElementTree
 import zlib
 
 from .compat import (
+    compat_HTMLParseError,
     compat_HTMLParser,
     compat_basestring,
     compat_chr,
+    compat_ctypes_WINFUNCTYPE,
     compat_etree_fromstring,
+    compat_expanduser,
     compat_html_entities,
     compat_html_entities_html5,
     compat_http_client,
@@ -79,7 +82,7 @@ def register_socks_protocols():
 compiled_regex_type = type(re.compile(''))
 
 std_headers = {
-    'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64; rv:10.0) Gecko/20150101 Firefox/47.0 (Chrome)',
+    'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64; rv:59.0) Gecko/20100101 Firefox/59.0 (Chrome)',
     'Accept-Charset': 'ISO-8859-1,utf-8;q=0.7,*;q=0.7',
     'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
     'Accept-Encoding': 'gzip, deflate',
@@ -157,6 +160,8 @@ DATE_FORMATS = (
     '%Y-%m-%dT%H:%M',
     '%b %d %Y at %H:%M',
     '%b %d %Y at %H:%M:%S',
+    '%B %d %Y at %H:%M',
+    '%B %d %Y at %H:%M:%S',
 )
 
 DATE_FORMATS_DAY_FIRST = list(DATE_FORMATS)
@@ -363,9 +368,9 @@ def get_elements_by_attribute(attribute, value, html, escape_value=True):
     retlist = []
     for m in re.finditer(r'''(?xs)
         <([a-zA-Z0-9:._-]+)
-         (?:\s+[a-zA-Z0-9:._-]+(?:=[a-zA-Z0-9:._-]*|="[^"]*"|='[^']*'))*?
+         (?:\s+[a-zA-Z0-9:._-]+(?:=[a-zA-Z0-9:._-]*|="[^"]*"|='[^']*'|))*?
          \s+%s=['"]?%s['"]?
-         (?:\s+[a-zA-Z0-9:._-]+(?:=[a-zA-Z0-9:._-]*|="[^"]*"|='[^']*'))*?
+         (?:\s+[a-zA-Z0-9:._-]+(?:=[a-zA-Z0-9:._-]*|="[^"]*"|='[^']*'|))*?
         \s*>
         (?P<content>.*?)
         </\1>
@@ -407,8 +412,12 @@ def extract_attributes(html_element):
     but the cases in the unit test will work for all of 2.6, 2.7, 3.2-3.5.
     """
     parser = HTMLAttributeParser()
-    parser.feed(html_element)
-    parser.close()
+    try:
+        parser.feed(html_element)
+        parser.close()
+    # Older Python may throw HTMLParseError in case of malformed HTML
+    except compat_HTMLParseError:
+        pass
     return parser.attrs
 
 
@@ -420,8 +429,8 @@ def clean_html(html):
 
     # Newline vs <br />
     html = html.replace('\n', ' ')
-    html = re.sub(r'\s*<\s*br\s*/?\s*>\s*', '\n', html)
-    html = re.sub(r'<\s*/\s*p\s*>\s*<\s*p[^>]*>', '\n', html)
+    html = re.sub(r'(?u)\s*<\s*br\s*/?\s*>\s*', '\n', html)
+    html = re.sub(r'(?u)<\s*/\s*p\s*>\s*<\s*p[^>]*>', '\n', html)
     # Strip html tags
     html = re.sub('<.*?>', '', html)
     # Replace html entities
@@ -529,14 +538,31 @@ def sanitize_path(s):
     return os.path.join(*sanitized_path)
 
 
-# Prepend protocol-less URLs with `http:` scheme in order to mitigate the number of
-# unwanted failures due to missing protocol
 def sanitize_url(url):
-    return 'http:%s' % url if url.startswith('//') else url
+    # Prepend protocol-less URLs with `http:` scheme in order to mitigate
+    # the number of unwanted failures due to missing protocol
+    if url.startswith('//'):
+        return 'http:%s' % url
+    # Fix some common typos seen so far
+    COMMON_TYPOS = (
+        # https://github.com/rg3/youtube-dl/issues/15649
+        (r'^httpss://', r'https://'),
+        # https://bx1.be/lives/direct-tv/
+        (r'^rmtp([es]?)://', r'rtmp\1://'),
+    )
+    for mistake, fixup in COMMON_TYPOS:
+        if re.match(mistake, url):
+            return re.sub(mistake, fixup, url)
+    return url
 
 
 def sanitized_Request(url, *args, **kwargs):
     return compat_urllib_request.Request(sanitize_url(url), *args, **kwargs)
+
+
+def expand_path(s):
+    """Expand shell variables and ~"""
+    return os.path.expandvars(compat_expanduser(s))
 
 
 def orderedSet(iterable):
@@ -585,7 +611,7 @@ def unescapeHTML(s):
     assert type(s) == compat_str
 
     return re.sub(
-        r'&([^;]+;)', lambda m: _htmlentity_transform(m.group(1)), s)
+        r'&([^&;]+;)', lambda m: _htmlentity_transform(m.group(1)), s)
 
 
 def get_subprocess_encoding():
@@ -852,8 +878,8 @@ def _create_http_connection(ydl_handler, http_class, is_https, *args, **kwargs):
     # expected HTTP responses to meet HTTP/1.0 or later (see also
     # https://github.com/rg3/youtube-dl/issues/6727)
     if sys.version_info < (3, 0):
-        kwargs[b'strict'] = True
-    hc = http_class(*args, **kwargs)
+        kwargs['strict'] = True
+    hc = http_class(*args, **compat_kwargs(kwargs))
     source_address = ydl_handler._params.get('source_address')
     if source_address is not None:
         sa = (source_address, 0)
@@ -925,14 +951,6 @@ class YoutubeDLHandler(compat_urllib_request.HTTPHandler):
         except zlib.error:
             return zlib.decompress(data)
 
-    @staticmethod
-    def addinfourl_wrapper(stream, headers, url, code):
-        if hasattr(compat_urllib_request.addinfourl, 'getcode'):
-            return compat_urllib_request.addinfourl(stream, headers, url, code)
-        ret = compat_urllib_request.addinfourl(stream, headers, url)
-        ret.code = code
-        return ret
-
     def http_request(self, req):
         # According to RFC 3986, URLs can not contain non-ASCII characters, however this is not
         # always respected by websites, some tend to give out URLs with non percent-encoded
@@ -984,13 +1002,13 @@ class YoutubeDLHandler(compat_urllib_request.HTTPHandler):
                     break
                 else:
                     raise original_ioerror
-            resp = self.addinfourl_wrapper(uncompressed, old_resp.headers, old_resp.url, old_resp.code)
+            resp = compat_urllib_request.addinfourl(uncompressed, old_resp.headers, old_resp.url, old_resp.code)
             resp.msg = old_resp.msg
             del resp.headers['Content-encoding']
         # deflate
         if resp.headers.get('Content-encoding', '') == 'deflate':
             gz = io.BytesIO(self.deflate(resp.read()))
-            resp = self.addinfourl_wrapper(gz, old_resp.headers, old_resp.url, old_resp.code)
+            resp = compat_urllib_request.addinfourl(gz, old_resp.headers, old_resp.url, old_resp.code)
             resp.msg = old_resp.msg
             del resp.headers['Content-encoding']
         # Percent-encode redirect URL of Location HTTP header to satisfy RFC 3986 (see
@@ -1180,13 +1198,23 @@ def unified_timestamp(date_str, day_first=True):
     if date_str is None:
         return None
 
-    date_str = date_str.replace(',', ' ')
+    date_str = re.sub(r'[,|]', '', date_str)
 
     pm_delta = 12 if re.search(r'(?i)PM', date_str) else 0
     timezone, date_str = extract_timezone(date_str)
 
     # Remove AM/PM + timezone
     date_str = re.sub(r'(?i)\s*(?:AM|PM)(?:\s+[A-Z]+)?', '', date_str)
+
+    # Remove unrecognized timezones from ISO 8601 alike timestamps
+    m = re.search(r'\d{1,2}:\d{1,2}(?:\.\d+)?(?P<tz>\s*[A-Z]+)$', date_str)
+    if m:
+        date_str = date_str[:-len(m.group('tz'))]
+
+    # Python only supports microseconds, so remove nanoseconds
+    m = re.search(r'^([0-9]{4,}-[0-9]{1,2}-[0-9]{1,2}T[0-9]{1,2}:[0-9]{1,2}:[0-9]{1,2}\.[0-9]{6})[0-9]+$', date_str)
+    if m:
+        date_str = m.group(1)
 
     for expression in date_formats(day_first):
         try:
@@ -1320,24 +1348,24 @@ def _windows_write_string(s, out):
     if fileno not in WIN_OUTPUT_IDS:
         return False
 
-    GetStdHandle = ctypes.WINFUNCTYPE(
+    GetStdHandle = compat_ctypes_WINFUNCTYPE(
         ctypes.wintypes.HANDLE, ctypes.wintypes.DWORD)(
-        (b'GetStdHandle', ctypes.windll.kernel32))
+        ('GetStdHandle', ctypes.windll.kernel32))
     h = GetStdHandle(WIN_OUTPUT_IDS[fileno])
 
-    WriteConsoleW = ctypes.WINFUNCTYPE(
+    WriteConsoleW = compat_ctypes_WINFUNCTYPE(
         ctypes.wintypes.BOOL, ctypes.wintypes.HANDLE, ctypes.wintypes.LPWSTR,
         ctypes.wintypes.DWORD, ctypes.POINTER(ctypes.wintypes.DWORD),
-        ctypes.wintypes.LPVOID)((b'WriteConsoleW', ctypes.windll.kernel32))
+        ctypes.wintypes.LPVOID)(('WriteConsoleW', ctypes.windll.kernel32))
     written = ctypes.wintypes.DWORD(0)
 
-    GetFileType = ctypes.WINFUNCTYPE(ctypes.wintypes.DWORD, ctypes.wintypes.DWORD)((b'GetFileType', ctypes.windll.kernel32))
+    GetFileType = compat_ctypes_WINFUNCTYPE(ctypes.wintypes.DWORD, ctypes.wintypes.DWORD)(('GetFileType', ctypes.windll.kernel32))
     FILE_TYPE_CHAR = 0x0002
     FILE_TYPE_REMOTE = 0x8000
-    GetConsoleMode = ctypes.WINFUNCTYPE(
+    GetConsoleMode = compat_ctypes_WINFUNCTYPE(
         ctypes.wintypes.BOOL, ctypes.wintypes.HANDLE,
         ctypes.POINTER(ctypes.wintypes.DWORD))(
-        (b'GetConsoleMode', ctypes.windll.kernel32))
+        ('GetConsoleMode', ctypes.windll.kernel32))
     INVALID_HANDLE_VALUE = ctypes.wintypes.DWORD(-1).value
 
     def not_a_console(handle):
@@ -1526,7 +1554,7 @@ def shell_quote(args):
         if isinstance(a, bytes):
             # We may get a filename encoded with 'encodeFilename'
             a = a.decode(encoding)
-        quoted_args.append(pipes.quote(a))
+        quoted_args.append(compat_shlex_quote(a))
     return ' '.join(quoted_args)
 
 
@@ -1664,6 +1692,28 @@ def parse_count(s):
     }
 
     return lookup_unit_table(_UNIT_TABLE, s)
+
+
+def parse_resolution(s):
+    if s is None:
+        return {}
+
+    mobj = re.search(r'\b(?P<w>\d+)\s*[xX×]\s*(?P<h>\d+)\b', s)
+    if mobj:
+        return {
+            'width': int(mobj.group('w')),
+            'height': int(mobj.group('h')),
+        }
+
+    mobj = re.search(r'\b(\d+)[pPiI]\b', s)
+    if mobj:
+        return {'height': int(mobj.group(1))}
+
+    mobj = re.search(r'\b([48])[kK]\b', s)
+    if mobj:
+        return {'height': int(mobj.group(1)) * 540}
+
+    return {}
 
 
 def month_by_name(name, lang='en'):
@@ -1807,6 +1857,10 @@ def float_or_none(v, scale=1, invscale=1, default=None):
         return default
 
 
+def bool_or_none(v, default=None):
+    return v if isinstance(v, bool) else default
+
+
 def strip_or_none(v):
     return None if v is None else v.strip()
 
@@ -1823,10 +1877,20 @@ def parse_duration(s):
         days, hours, mins, secs, ms = m.groups()
     else:
         m = re.match(
-            r'''(?ix)(?:P?T)?
+            r'''(?ix)(?:P?
+                (?:
+                    [0-9]+\s*y(?:ears?)?\s*
+                )?
+                (?:
+                    [0-9]+\s*m(?:onths?)?\s*
+                )?
+                (?:
+                    [0-9]+\s*w(?:eeks?)?\s*
+                )?
                 (?:
                     (?P<days>[0-9]+)\s*d(?:ays?)?\s*
                 )?
+                T)?
                 (?:
                     (?P<hours>[0-9]+)\s*h(?:ours?)?\s*
                 )?
@@ -1921,7 +1985,7 @@ class PagedList(object):
 
 
 class OnDemandPagedList(PagedList):
-    def __init__(self, pagefunc, pagesize, use_cache=False):
+    def __init__(self, pagefunc, pagesize, use_cache=True):
         self._pagefunc = pagefunc
         self._pagesize = pagesize
         self._use_cache = use_cache
@@ -2086,6 +2150,58 @@ def update_Request(req, url=None, data=None, headers={}, query={}):
     return new_req
 
 
+def _multipart_encode_impl(data, boundary):
+    content_type = 'multipart/form-data; boundary=%s' % boundary
+
+    out = b''
+    for k, v in data.items():
+        out += b'--' + boundary.encode('ascii') + b'\r\n'
+        if isinstance(k, compat_str):
+            k = k.encode('utf-8')
+        if isinstance(v, compat_str):
+            v = v.encode('utf-8')
+        # RFC 2047 requires non-ASCII field names to be encoded, while RFC 7578
+        # suggests sending UTF-8 directly. Firefox sends UTF-8, too
+        content = b'Content-Disposition: form-data; name="' + k + b'"\r\n\r\n' + v + b'\r\n'
+        if boundary.encode('ascii') in content:
+            raise ValueError('Boundary overlaps with data')
+        out += content
+
+    out += b'--' + boundary.encode('ascii') + b'--\r\n'
+
+    return out, content_type
+
+
+def multipart_encode(data, boundary=None):
+    '''
+    Encode a dict to RFC 7578-compliant form-data
+
+    data:
+        A dict where keys and values can be either Unicode or bytes-like
+        objects.
+    boundary:
+        If specified a Unicode object, it's used as the boundary. Otherwise
+        a random boundary is generated.
+
+    Reference: https://tools.ietf.org/html/rfc7578
+    '''
+    has_specified_boundary = boundary is not None
+
+    while True:
+        if boundary is None:
+            boundary = '---------------' + str(random.randrange(0x0fffffff, 0xffffffff))
+
+        try:
+            out, content_type = _multipart_encode_impl(data, boundary)
+            break
+        except ValueError:
+            if has_specified_boundary:
+                raise
+            boundary = None
+
+    return out, content_type
+
+
 def dict_get(d, key_or_keys, default=None, skip_false_values=True):
     if isinstance(key_or_keys, (list, tuple)):
         for key in key_or_keys:
@@ -2097,13 +2213,30 @@ def dict_get(d, key_or_keys, default=None, skip_false_values=True):
 
 
 def try_get(src, getter, expected_type=None):
-    try:
-        v = getter(src)
-    except (AttributeError, KeyError, TypeError, IndexError):
-        pass
-    else:
-        if expected_type is None or isinstance(v, expected_type):
-            return v
+    if not isinstance(getter, (list, tuple)):
+        getter = [getter]
+    for get in getter:
+        try:
+            v = get(src)
+        except (AttributeError, KeyError, TypeError, IndexError):
+            pass
+        else:
+            if expected_type is None or isinstance(v, expected_type):
+                return v
+
+
+def merge_dicts(*dicts):
+    merged = {}
+    for a_dict in dicts:
+        for k, v in a_dict.items():
+            if v is None:
+                continue
+            if (k not in merged or
+                    (isinstance(v, compat_str) and v and
+                        isinstance(merged[k], compat_str) and
+                        not merged[k])):
+                merged[k] = v
+    return merged
 
 
 def encode_compat_str(string, encoding=preferredencoding(), errors='strict'):
@@ -2139,12 +2272,20 @@ def parse_age_limit(s):
         return int(m.group('age'))
     if s in US_RATINGS:
         return US_RATINGS[s]
-    return TV_PARENTAL_GUIDELINES.get(s)
+    m = re.match(r'^TV[_-]?(%s)$' % '|'.join(k[3:] for k in TV_PARENTAL_GUIDELINES), s)
+    if m:
+        return TV_PARENTAL_GUIDELINES['TV-' + m.group(1)]
+    return None
 
 
 def strip_jsonp(code):
     return re.sub(
-        r'(?s)^[a-zA-Z0-9_.$]+\s*\(\s*(.*)\);?\s*?(?://[^\n]*)*$', r'\1', code)
+        r'''(?sx)^
+            (?:window\.)?(?P<func_name>[a-zA-Z0-9_.$]+)
+            (?:\s*&&\s*(?P=func_name))?
+            \s*\(\s*(?P<callback_data>.*)\);?
+            \s*?(?://[^\n]*)*$''',
+        r'\g<callback_data>', code)
 
 
 def js_to_json(code):
@@ -2182,7 +2323,7 @@ def js_to_json(code):
         "(?:[^"\\]*(?:\\\\|\\['"nurtbfx/\n]))*[^"\\]*"|
         '(?:[^'\\]*(?:\\\\|\\['"nurtbfx/\n]))*[^'\\]*'|
         {comment}|,(?={skip}[\]}}])|
-        [a-zA-Z_][.a-zA-Z_0-9]*|
+        (?:(?<![0-9])[eE]|[a-df-zA-DF-Z_])[.a-zA-Z_0-9]*|
         \b(?:0[xX][0-9a-fA-F]+|0+[0-7]+)(?:{skip}:)?|
         [0-9]+(?={skip}:)
         '''.format(comment=COMMENT_RE, skip=SKIP_RE), fix_kv, code)
@@ -2264,22 +2405,21 @@ def mimetype2ext(mt):
     return {
         '3gpp': '3gp',
         'smptett+xml': 'tt',
-        'srt': 'srt',
         'ttaf+xml': 'dfxp',
         'ttml+xml': 'ttml',
-        'vtt': 'vtt',
         'x-flv': 'flv',
         'x-mp4-fragmented': 'mp4',
+        'x-ms-sami': 'sami',
         'x-ms-wmv': 'wmv',
         'mpegurl': 'm3u8',
         'x-mpegurl': 'm3u8',
         'vnd.apple.mpegurl': 'm3u8',
         'dash+xml': 'mpd',
-        'f4m': 'f4m',
         'f4m+xml': 'f4m',
         'hds+xml': 'f4m',
         'vnd.ms-sstr+xml': 'ism',
         'quicktime': 'mov',
+        'mp2t': 'ts',
     }.get(res, res)
 
 
@@ -2292,14 +2432,14 @@ def parse_codecs(codecs_str):
     vcodec, acodec = None, None
     for full_codec in splited_codecs:
         codec = full_codec.split('.')[0]
-        if codec in ('avc1', 'avc2', 'avc3', 'avc4', 'vp9', 'vp8', 'hev1', 'hev2', 'h263', 'h264', 'mp4v'):
+        if codec in ('avc1', 'avc2', 'avc3', 'avc4', 'vp9', 'vp8', 'hev1', 'hev2', 'h263', 'h264', 'mp4v', 'hvc1'):
             if not vcodec:
                 vcodec = full_codec
-        elif codec in ('mp4a', 'opus', 'vorbis', 'mp3', 'aac', 'ac-3'):
+        elif codec in ('mp4a', 'opus', 'vorbis', 'mp3', 'aac', 'ac-3', 'ec-3', 'eac3', 'dtsc', 'dtse', 'dtsh', 'dtsl'):
             if not acodec:
                 acodec = full_codec
         else:
-            write_string('WARNING: Unknown codec %s' % full_codec, sys.stderr)
+            write_string('WARNING: Unknown codec %s\n' % full_codec, sys.stderr)
     if not vcodec and not acodec:
         if len(splited_codecs) == 2:
             return {
@@ -2451,8 +2591,8 @@ def _match_one(filter_part, dct):
         return op(actual_value, comparison_value)
 
     UNARY_OPERATORS = {
-        '': lambda v: v is not None,
-        '!': lambda v: v is None,
+        '': lambda v: (v is True) if isinstance(v, bool) else (v is not None),
+        '!': lambda v: (v is False) if isinstance(v, bool) else (v is None),
     }
     operator_rex = re.compile(r'''(?x)\s*
         (?P<op>%s)\s*(?P<key>[a-z_]+)
@@ -2502,27 +2642,102 @@ def srt_subtitles_timecode(seconds):
 
 
 def dfxp2srt(dfxp_data):
+    '''
+    @param dfxp_data A bytes-like object containing DFXP data
+    @returns A unicode object containing converted SRT data
+    '''
+    LEGACY_NAMESPACES = (
+        (b'http://www.w3.org/ns/ttml', [
+            b'http://www.w3.org/2004/11/ttaf1',
+            b'http://www.w3.org/2006/04/ttaf1',
+            b'http://www.w3.org/2006/10/ttaf1',
+        ]),
+        (b'http://www.w3.org/ns/ttml#styling', [
+            b'http://www.w3.org/ns/ttml#style',
+        ]),
+    )
+
+    SUPPORTED_STYLING = [
+        'color',
+        'fontFamily',
+        'fontSize',
+        'fontStyle',
+        'fontWeight',
+        'textDecoration'
+    ]
+
     _x = functools.partial(xpath_with_ns, ns_map={
+        'xml': 'http://www.w3.org/XML/1998/namespace',
         'ttml': 'http://www.w3.org/ns/ttml',
-        'ttaf1': 'http://www.w3.org/2006/10/ttaf1',
-        'ttaf1_0604': 'http://www.w3.org/2006/04/ttaf1',
+        'tts': 'http://www.w3.org/ns/ttml#styling',
     })
 
+    styles = {}
+    default_style = {}
+
     class TTMLPElementParser(object):
-        out = ''
+        _out = ''
+        _unclosed_elements = []
+        _applied_styles = []
 
         def start(self, tag, attrib):
-            if tag in (_x('ttml:br'), _x('ttaf1:br'), 'br'):
-                self.out += '\n'
+            if tag in (_x('ttml:br'), 'br'):
+                self._out += '\n'
+            else:
+                unclosed_elements = []
+                style = {}
+                element_style_id = attrib.get('style')
+                if default_style:
+                    style.update(default_style)
+                if element_style_id:
+                    style.update(styles.get(element_style_id, {}))
+                for prop in SUPPORTED_STYLING:
+                    prop_val = attrib.get(_x('tts:' + prop))
+                    if prop_val:
+                        style[prop] = prop_val
+                if style:
+                    font = ''
+                    for k, v in sorted(style.items()):
+                        if self._applied_styles and self._applied_styles[-1].get(k) == v:
+                            continue
+                        if k == 'color':
+                            font += ' color="%s"' % v
+                        elif k == 'fontSize':
+                            font += ' size="%s"' % v
+                        elif k == 'fontFamily':
+                            font += ' face="%s"' % v
+                        elif k == 'fontWeight' and v == 'bold':
+                            self._out += '<b>'
+                            unclosed_elements.append('b')
+                        elif k == 'fontStyle' and v == 'italic':
+                            self._out += '<i>'
+                            unclosed_elements.append('i')
+                        elif k == 'textDecoration' and v == 'underline':
+                            self._out += '<u>'
+                            unclosed_elements.append('u')
+                    if font:
+                        self._out += '<font' + font + '>'
+                        unclosed_elements.append('font')
+                    applied_style = {}
+                    if self._applied_styles:
+                        applied_style.update(self._applied_styles[-1])
+                    applied_style.update(style)
+                    self._applied_styles.append(applied_style)
+                self._unclosed_elements.append(unclosed_elements)
 
         def end(self, tag):
-            pass
+            if tag not in (_x('ttml:br'), 'br'):
+                unclosed_elements = self._unclosed_elements.pop()
+                for element in reversed(unclosed_elements):
+                    self._out += '</%s>' % element
+                if unclosed_elements and self._applied_styles:
+                    self._applied_styles.pop()
 
         def data(self, data):
-            self.out += data
+            self._out += data
 
         def close(self):
-            return self.out.strip()
+            return self._out.strip()
 
     def parse_node(node):
         target = TTMLPElementParser()
@@ -2530,12 +2745,46 @@ def dfxp2srt(dfxp_data):
         parser.feed(xml.etree.ElementTree.tostring(node))
         return parser.close()
 
-    dfxp = compat_etree_fromstring(dfxp_data.encode('utf-8'))
+    for k, v in LEGACY_NAMESPACES:
+        for ns in v:
+            dfxp_data = dfxp_data.replace(ns, k)
+
+    dfxp = compat_etree_fromstring(dfxp_data)
     out = []
-    paras = dfxp.findall(_x('.//ttml:p')) or dfxp.findall(_x('.//ttaf1:p')) or dfxp.findall(_x('.//ttaf1_0604:p')) or dfxp.findall('.//p')
+    paras = dfxp.findall(_x('.//ttml:p')) or dfxp.findall('.//p')
 
     if not paras:
         raise ValueError('Invalid dfxp/TTML subtitle')
+
+    repeat = False
+    while True:
+        for style in dfxp.findall(_x('.//ttml:style')):
+            style_id = style.get('id') or style.get(_x('xml:id'))
+            if not style_id:
+                continue
+            parent_style_id = style.get('style')
+            if parent_style_id:
+                if parent_style_id not in styles:
+                    repeat = True
+                    continue
+                styles[style_id] = styles[parent_style_id].copy()
+            for prop in SUPPORTED_STYLING:
+                prop_val = style.get(_x('tts:' + prop))
+                if prop_val:
+                    styles.setdefault(style_id, {})[prop] = prop_val
+        if repeat:
+            repeat = False
+        else:
+            break
+
+    for p in ('body', 'div'):
+        ele = xpath_element(dfxp, [_x('.//ttml:' + p), './/' + p])
+        if ele is None:
+            continue
+        style = styles.get(ele.get('style'))
+        if not style:
+            continue
+        default_style.update(style)
 
     for para, index in zip(paras, itertools.count(1)):
         begin_time = parse_dfxp_time_expr(para.attrib.get('begin'))
@@ -2565,6 +2814,8 @@ def cli_option(params, command_option, param):
 
 def cli_bool_option(params, command_option, param, true_value='true', false_value='false', separator=None):
     param = params.get(param)
+    if param is None:
+        return []
     assert isinstance(param, bool)
     if separator:
         return [command_option + separator + (true_value if param else false_value)]
@@ -3289,10 +3540,13 @@ class GeoUtils(object):
     }
 
     @classmethod
-    def random_ipv4(cls, code):
-        block = cls._country_ip_map.get(code.upper())
-        if not block:
-            return None
+    def random_ipv4(cls, code_or_block):
+        if len(code_or_block) == 2:
+            block = cls._country_ip_map.get(code_or_block.upper())
+            if not block:
+                return None
+        else:
+            block = code_or_block
         addr, preflen = block.split('/')
         addr_min = compat_struct_unpack('!L', socket.inet_aton(addr))[0]
         addr_max = addr_min | (0xffffffff >> int(preflen))
@@ -3646,3 +3900,11 @@ def write_xattr(path, key, value):
                         "Couldn't find a tool to set the xattrs. "
                         "Install either the python 'xattr' module, "
                         "or the 'xattr' binary.")
+
+
+def random_birthday(year_field, month_field, day_field):
+    return {
+        year_field: str(random.randint(1950, 1995)),
+        month_field: str(random.randint(1, 12)),
+        day_field: str(random.randint(1, 31)),
+    }

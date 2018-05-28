@@ -18,6 +18,7 @@ from ..utils import (
     parse_duration,
     qualities,
     srt_subtitles_timecode,
+    try_get,
     update_url_query,
     urlencode_postdata,
 )
@@ -25,6 +26,39 @@ from ..utils import (
 
 class PluralsightBaseIE(InfoExtractor):
     _API_BASE = 'https://app.pluralsight.com'
+
+    def _download_course(self, course_id, url, display_id):
+        try:
+            return self._download_course_rpc(course_id, url, display_id)
+        except ExtractorError:
+            # Old API fallback
+            return self._download_json(
+                'https://app.pluralsight.com/player/user/api/v1/player/payload',
+                display_id, data=urlencode_postdata({'courseId': course_id}),
+                headers={'Referer': url})
+
+    def _download_course_rpc(self, course_id, url, display_id):
+        response = self._download_json(
+            '%s/player/functions/rpc' % self._API_BASE, display_id,
+            'Downloading course JSON',
+            data=json.dumps({
+                'fn': 'bootstrapPlayer',
+                'payload': {
+                    'courseId': course_id,
+                },
+            }).encode('utf-8'),
+            headers={
+                'Content-Type': 'application/json;charset=utf-8',
+                'Referer': url,
+            })
+
+        course = try_get(response, lambda x: x['payload']['course'], dict)
+        if course:
+            return course
+
+        raise ExtractorError(
+            '%s said: %s' % (self.IE_NAME, response['error']['message']),
+            expected=True)
 
 
 class PluralsightIE(PluralsightBaseIE):
@@ -40,7 +74,7 @@ class PluralsightIE(PluralsightBaseIE):
         'info_dict': {
             'id': 'hosting-sql-server-windows-azure-iaas-m7-mgmt-04',
             'ext': 'mp4',
-            'title': 'Management of SQL Server - Demo Monitoring',
+            'title': 'Demo Monitoring',
             'duration': 338,
         },
         'skip': 'Requires pluralsight account credentials',
@@ -60,7 +94,7 @@ class PluralsightIE(PluralsightBaseIE):
         self._login()
 
     def _login(self):
-        (username, password) = self._get_login_info()
+        username, password = self._get_login_info()
         if username is None:
             return
 
@@ -82,7 +116,7 @@ class PluralsightIE(PluralsightBaseIE):
             post_url = compat_urlparse.urljoin(self._LOGIN_URL, post_url)
 
         response = self._download_webpage(
-            post_url, None, 'Logging in as %s' % username,
+            post_url, None, 'Logging in',
             data=urlencode_postdata(login_form),
             headers={'Content-Type': 'application/x-www-form-urlencoded'})
 
@@ -97,12 +131,19 @@ class PluralsightIE(PluralsightBaseIE):
             if BLOCKED in response:
                 raise ExtractorError(
                     'Unable to login: %s' % BLOCKED, expected=True)
+            MUST_AGREE = 'To continue using Pluralsight, you must agree to'
+            if any(p in response for p in (MUST_AGREE, '>Disagree<', '>Agree<')):
+                raise ExtractorError(
+                    'Unable to login: %s some documents. Go to pluralsight.com, '
+                    'log in and agree with what Pluralsight requires.'
+                    % MUST_AGREE, expected=True)
+
             raise ExtractorError('Unable to log in')
 
-    def _get_subtitles(self, author, clip_id, lang, name, duration, video_id):
+    def _get_subtitles(self, author, clip_idx, lang, name, duration, video_id):
         captions_post = {
             'a': author,
-            'cn': clip_id,
+            'cn': clip_idx,
             'lc': lang,
             'm': name,
         }
@@ -130,12 +171,12 @@ class PluralsightIE(PluralsightBaseIE):
         for num, current in enumerate(subs):
             current = subs[num]
             start, text = (
-                float_or_none(dict_get(current, TIME_OFFSET_KEYS)),
+                float_or_none(dict_get(current, TIME_OFFSET_KEYS, skip_false_values=False)),
                 dict_get(current, TEXT_KEYS))
             if start is None or text is None:
                 continue
             end = duration if num == len(subs) - 1 else float_or_none(
-                dict_get(subs[num + 1], TIME_OFFSET_KEYS))
+                dict_get(subs[num + 1], TIME_OFFSET_KEYS, skip_false_values=False))
             if end is None:
                 continue
             srt += os.linesep.join(
@@ -154,40 +195,37 @@ class PluralsightIE(PluralsightBaseIE):
 
         author = qs.get('author', [None])[0]
         name = qs.get('name', [None])[0]
-        clip_id = qs.get('clip', [None])[0]
+        clip_idx = qs.get('clip', [None])[0]
         course_name = qs.get('course', [None])[0]
 
-        if any(not f for f in (author, name, clip_id, course_name,)):
+        if any(not f for f in (author, name, clip_idx, course_name,)):
             raise ExtractorError('Invalid URL', expected=True)
 
-        display_id = '%s-%s' % (name, clip_id)
+        display_id = '%s-%s' % (name, clip_idx)
 
-        course = self._download_json(
-            'https://app.pluralsight.com/player/user/api/v1/player/payload',
-            display_id, data=urlencode_postdata({'courseId': course_name}),
-            headers={'Referer': url})
+        course = self._download_course(course_name, url, display_id)
 
         collection = course['modules']
 
-        module, clip = None, None
+        clip = None
 
         for module_ in collection:
             if name in (module_.get('moduleName'), module_.get('name')):
-                module = module_
                 for clip_ in module_.get('clips', []):
                     clip_index = clip_.get('clipIndex')
                     if clip_index is None:
                         clip_index = clip_.get('index')
                     if clip_index is None:
                         continue
-                    if compat_str(clip_index) == clip_id:
+                    if compat_str(clip_index) == clip_idx:
                         clip = clip_
                         break
 
         if not clip:
             raise ExtractorError('Unable to resolve clip')
 
-        title = '%s - %s' % (module['title'], clip['title'])
+        title = clip['title']
+        clip_id = clip.get('clipName') or clip.get('name') or clip['clipId']
 
         QUALITIES = {
             'low': {'width': 640, 'height': 480},
@@ -225,6 +263,7 @@ class PluralsightIE(PluralsightBaseIE):
                 req_format_split = req_format.split('-', 1)
                 if len(req_format_split) > 1:
                     req_ext, req_quality = req_format_split
+                    req_quality = '-'.join(req_quality.split('-')[:2])
                     for allowed_quality in ALLOWED_QUALITIES:
                         if req_ext == allowed_quality.ext and req_quality in allowed_quality.qualities:
                             return (AllowedQuality(req_ext, (req_quality, )), )
@@ -239,7 +278,7 @@ class PluralsightIE(PluralsightBaseIE):
                 clip_post = {
                     'author': author,
                     'includeCaptions': False,
-                    'clipIndex': int(clip_id),
+                    'clipIndex': int(clip_idx),
                     'courseName': course_name,
                     'locale': 'en',
                     'moduleName': name,
@@ -292,10 +331,10 @@ class PluralsightIE(PluralsightBaseIE):
 
         # TODO: other languages?
         subtitles = self.extract_subtitles(
-            author, clip_id, 'en', name, duration, display_id)
+            author, clip_idx, 'en', name, duration, display_id)
 
         return {
-            'id': clip.get('clipName') or clip['name'],
+            'id': clip_id,
             'title': title,
             'duration': duration,
             'creator': author,
@@ -331,18 +370,7 @@ class PluralsightCourseIE(PluralsightBaseIE):
 
         # TODO: PSM cookie
 
-        course = self._download_json(
-            '%s/player/functions/rpc' % self._API_BASE, course_id,
-            'Downloading course JSON',
-            data=json.dumps({
-                'fn': 'bootstrapPlayer',
-                'payload': {
-                    'courseId': course_id,
-                }
-            }).encode('utf-8'),
-            headers={
-                'Content-Type': 'application/json;charset=utf-8'
-            })['payload']['course']
+        course = self._download_course(course_id, url, course_id)
 
         title = course['title']
         course_name = course['name']

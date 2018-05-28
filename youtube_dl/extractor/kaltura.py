@@ -91,6 +91,7 @@ class KalturaIE(InfoExtractor):
                     }],
                 },
             },
+            'skip': 'Gone. Maybe https://www.safaribooksonline.com/library/tutorials/introduction-to-python-anon/3469/',
             'params': {
                 'skip_download': True,
             },
@@ -107,27 +108,41 @@ class KalturaIE(InfoExtractor):
 
     @staticmethod
     def _extract_url(webpage):
+        # Embed codes: https://knowledge.kaltura.com/embedding-kaltura-media-players-your-site
         mobj = (
             re.search(
                 r"""(?xs)
                     kWidget\.(?:thumb)?[Ee]mbed\(
                     \{.*?
-                        (?P<q1>['\"])wid(?P=q1)\s*:\s*
-                        (?P<q2>['\"])_?(?P<partner_id>(?:(?!(?P=q2)).)+)(?P=q2),.*?
-                        (?P<q3>['\"])entry_?[Ii]d(?P=q3)\s*:\s*
-                        (?P<q4>['\"])(?P<id>(?:(?!(?P=q4)).)+)(?P=q4)(?:,|\s*\})
+                        (?P<q1>['"])wid(?P=q1)\s*:\s*
+                        (?P<q2>['"])_?(?P<partner_id>(?:(?!(?P=q2)).)+)(?P=q2),.*?
+                        (?P<q3>['"])entry_?[Ii]d(?P=q3)\s*:\s*
+                        (?P<q4>['"])(?P<id>(?:(?!(?P=q4)).)+)(?P=q4)(?:,|\s*\})
                 """, webpage) or
             re.search(
                 r'''(?xs)
-                    (?P<q1>["\'])
+                    (?P<q1>["'])
                         (?:https?:)?//cdnapi(?:sec)?\.kaltura\.com(?::\d+)?/(?:(?!(?P=q1)).)*\b(?:p|partner_id)/(?P<partner_id>\d+)(?:(?!(?P=q1)).)*
                     (?P=q1).*?
                     (?:
-                        entry_?[Ii]d|
-                        (?P<q2>["\'])entry_?[Ii]d(?P=q2)
-                    )\s*:\s*
-                    (?P<q3>["\'])(?P<id>(?:(?!(?P=q3)).)+)(?P=q3)
-                ''', webpage))
+                        (?:
+                            entry_?[Ii]d|
+                            (?P<q2>["'])entry_?[Ii]d(?P=q2)
+                        )\s*:\s*|
+                        \[\s*(?P<q2_1>["'])entry_?[Ii]d(?P=q2_1)\s*\]\s*=\s*
+                    )
+                    (?P<q3>["'])(?P<id>(?:(?!(?P=q3)).)+)(?P=q3)
+                ''', webpage) or
+            re.search(
+                r'''(?xs)
+                    <(?:iframe[^>]+src|meta[^>]+\bcontent)=(?P<q1>["'])
+                      (?:https?:)?//(?:(?:www|cdnapi(?:sec)?)\.)?kaltura\.com/(?:(?!(?P=q1)).)*\b(?:p|partner_id)/(?P<partner_id>\d+)
+                      (?:(?!(?P=q1)).)*
+                      [?&;]entry_id=(?P<id>(?:(?!(?P=q1))[^&])+)
+                      (?:(?!(?P=q1)).)*
+                    (?P=q1)
+                ''', webpage)
+        )
         if mobj:
             embed_info = mobj.groupdict()
             url = 'kaltura:%(partner_id)s:%(id)s' % embed_info
@@ -276,6 +291,9 @@ class KalturaIE(InfoExtractor):
             # skip for now.
             if f.get('fileExt') == 'chun':
                 continue
+            # DRM-protected video, cannot be decrypted
+            if f.get('fileExt') == 'wvm':
+                continue
             if not f.get('fileExt'):
                 # QT indicates QuickTime; some videos have broken fileExt
                 if f.get('containerFormat') == 'qt':
@@ -313,7 +331,7 @@ class KalturaIE(InfoExtractor):
         if captions:
             for caption in captions.get('objects', []):
                 # Continue if caption is not ready
-                if f.get('status') != 2:
+                if caption.get('status') != 2:
                     continue
                 if not caption.get('id'):
                     continue

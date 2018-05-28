@@ -16,7 +16,6 @@ from .options import (
     parseOpts,
 )
 from .compat import (
-    compat_expanduser,
     compat_getpass,
     compat_shlex_split,
     workaround_optparse_bug9161,
@@ -26,6 +25,7 @@ from .utils import (
     decodeOption,
     DEFAULT_OUTTMPL,
     DownloadError,
+    expand_path,
     match_filter_func,
     MaxDownloadsReached,
     preferredencoding,
@@ -88,7 +88,7 @@ def _real_main(argv=None):
                 batchfd = sys.stdin
             else:
                 batchfd = io.open(
-                    compat_expanduser(opts.batchfile),
+                    expand_path(opts.batchfile),
                     'r', encoding='utf-8', errors='ignore')
             batch_urls = read_batch_urls(batchfd)
             if opts.verbose:
@@ -191,12 +191,17 @@ def _real_main(argv=None):
         if numeric_buffersize is None:
             parser.error('invalid buffer size specified')
         opts.buffersize = numeric_buffersize
+    if opts.http_chunk_size is not None:
+        numeric_chunksize = FileDownloader.parse_bytes(opts.http_chunk_size)
+        if not numeric_chunksize:
+            parser.error('invalid http chunk size specified')
+        opts.http_chunk_size = numeric_chunksize
     if opts.playliststart <= 0:
         raise ValueError('Playlist start must be positive')
     if opts.playlistend not in (-1, None) and opts.playlistend < opts.playliststart:
         raise ValueError('Playlist end must be greater than playlist start')
     if opts.extractaudio:
-        if opts.audioformat not in ['best', 'aac', 'mp3', 'm4a', 'opus', 'vorbis', 'wav']:
+        if opts.audioformat not in ['best', 'aac', 'flac', 'mp3', 'm4a', 'opus', 'vorbis', 'wav']:
             parser.error('invalid audio format specified')
     if opts.audioquality:
         opts.audioquality = opts.audioquality.strip('k').strip('K')
@@ -206,7 +211,7 @@ def _real_main(argv=None):
         if opts.recodevideo not in ['mp4', 'flv', 'webm', 'ogg', 'mkv', 'avi']:
             parser.error('invalid video recode format specified')
     if opts.convertsubtitles is not None:
-        if opts.convertsubtitles not in ['srt', 'vtt', 'ass']:
+        if opts.convertsubtitles not in ['srt', 'vtt', 'ass', 'lrc']:
             parser.error('invalid subtitle format specified')
 
     if opts.date is not None:
@@ -238,7 +243,7 @@ def _real_main(argv=None):
 
     any_getting = opts.geturl or opts.gettitle or opts.getid or opts.getthumbnail or opts.getdescription or opts.getfilename or opts.getformat or opts.getduration or opts.dumpjson or opts.dump_single_json
     any_printing = opts.print_json
-    download_archive_fn = compat_expanduser(opts.download_archive) if opts.download_archive is not None else opts.download_archive
+    download_archive_fn = expand_path(opts.download_archive) if opts.download_archive is not None else opts.download_archive
 
     # PostProcessors
     postprocessors = []
@@ -259,6 +264,16 @@ def _real_main(argv=None):
             'key': 'FFmpegVideoConvertor',
             'preferedformat': opts.recodevideo,
         })
+    # FFmpegMetadataPP should be run after FFmpegVideoConvertorPP and
+    # FFmpegExtractAudioPP as containers before conversion may not support
+    # metadata (3gp, webm, etc.)
+    # And this post-processor should be placed before other metadata
+    # manipulating post-processors (FFmpegEmbedSubtitle) to prevent loss of
+    # extra metadata. By default ffmpeg preserves metadata applicable for both
+    # source and target containers. From this point the container won't change,
+    # so metadata can be added here.
+    if opts.addmetadata:
+        postprocessors.append({'key': 'FFmpegMetadata'})
     if opts.convertsubtitles:
         postprocessors.append({
             'key': 'FFmpegSubtitlesConvertor',
@@ -276,11 +291,6 @@ def _real_main(argv=None):
         })
         if not already_have_thumbnail:
             opts.writethumbnail = True
-    # FFmpegMetadataPP should be run after FFmpegVideoConvertorPP and
-    # FFmpegExtractAudioPP as containers before conversion may not support
-    # metadata (3gp, webm, etc.)
-    if opts.addmetadata:
-        postprocessors.append({'key': 'FFmpegMetadata'})
     # XAttrMetadataPP should be run after post-processors that may change file
     # contents
     if opts.xattrs:
@@ -338,8 +348,10 @@ def _real_main(argv=None):
         'retries': opts.retries,
         'fragment_retries': opts.fragment_retries,
         'skip_unavailable_fragments': opts.skip_unavailable_fragments,
+        'keep_fragments': opts.keep_fragments,
         'buffersize': opts.buffersize,
         'noresizebuffer': opts.noresizebuffer,
+        'http_chunk_size': opts.http_chunk_size,
         'continuedl': opts.continue_dl,
         'noprogress': opts.noprogress,
         'progress_with_newline': opts.progress_with_newline,
@@ -418,6 +430,7 @@ def _real_main(argv=None):
         'config_location': opts.config_location,
         'geo_bypass': opts.geo_bypass,
         'geo_bypass_country': opts.geo_bypass_country,
+        'geo_bypass_ip_block': opts.geo_bypass_ip_block,
         # just for deprecation check
         'autonumber': opts.autonumber if opts.autonumber is True else None,
         'usetitle': opts.usetitle if opts.usetitle is True else None,
@@ -444,7 +457,7 @@ def _real_main(argv=None):
 
         try:
             if opts.load_info_filename is not None:
-                retcode = ydl.download_with_info_file(compat_expanduser(opts.load_info_filename))
+                retcode = ydl.download_with_info_file(expand_path(opts.load_info_filename))
             else:
                 retcode = ydl.download(all_urls)
         except MaxDownloadsReached:

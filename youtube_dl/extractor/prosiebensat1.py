@@ -129,10 +129,11 @@ class ProSiebenSat1IE(ProSiebenSat1BaseIE):
                     https?://
                         (?:www\.)?
                         (?:
+                            (?:beta\.)?
                             (?:
                                 prosieben(?:maxx)?|sixx|sat1(?:gold)?|kabeleins(?:doku)?|the-voice-of-germany|7tv|advopedia
                             )\.(?:de|at|ch)|
-                            ran\.de|fem\.com|advopedia\.de
+                            ran\.de|fem\.com|advopedia\.de|galileo\.tv/video
                         )
                         /(?P<id>.+)
                     '''
@@ -301,6 +302,21 @@ class ProSiebenSat1IE(ProSiebenSat1BaseIE):
             },
         },
         {
+            # title in <h2 class="subtitle">
+            'url': 'http://www.prosieben.de/stars/oscar-award/videos/jetzt-erst-enthuellt-das-geheimnis-von-emma-stones-oscar-robe-clip',
+            'info_dict': {
+                'id': '4895826',
+                'ext': 'mp4',
+                'title': 'Jetzt erst enthüllt: Das Geheimnis von Emma Stones Oscar-Robe',
+                'description': 'md5:e5ace2bc43fadf7b63adc6187e9450b9',
+                'upload_date': '20170302',
+            },
+            'params': {
+                'skip_download': True,
+            },
+            'skip': 'geo restricted to Germany',
+        },
+        {
             # geo restricted to Germany
             'url': 'http://www.kabeleinsdoku.de/tv/mayday-alarm-im-cockpit/video/102-notlandung-im-hudson-river-ganze-folge',
             'only_matching': True,
@@ -308,6 +324,11 @@ class ProSiebenSat1IE(ProSiebenSat1BaseIE):
         {
             # geo restricted to Germany
             'url': 'http://www.sat1gold.de/tv/edel-starck/video/11-staffel-1-episode-1-partner-wider-willen-ganze-folge',
+            'only_matching': True,
+        },
+        {
+            # geo restricted to Germany
+            'url': 'https://www.galileo.tv/video/diese-emojis-werden-oft-missverstanden',
             'only_matching': True,
         },
         {
@@ -327,8 +348,10 @@ class ProSiebenSat1IE(ProSiebenSat1BaseIE):
         r'"clip_id"\s*:\s+"(\d+)"',
         r'clipid: "(\d+)"',
         r'clip[iI]d=(\d+)',
-        r'clip[iI]d\s*=\s*["\'](\d+)',
+        r'clip[iI][dD]\s*=\s*["\'](\d+)',
         r"'itemImageUrl'\s*:\s*'/dynamic/thumbnails/full/\d+/(\d+)",
+        r'proMamsId&quot;\s*:\s*&quot;(\d+)',
+        r'proMamsId"\s*:\s*"(\d+)',
     ]
     _TITLE_REGEXES = [
         r'<h2 class="subtitle" itemprop="name">\s*(.+?)</h2>',
@@ -338,6 +361,7 @@ class ProSiebenSat1IE(ProSiebenSat1BaseIE):
         r'<header class="module_header">\s*<h2>([^<]+)</h2>\s*</header>',
         r'<h2 class="video-title" itemprop="name">\s*(.+?)</h2>',
         r'<div[^>]+id="veeseoTitle"[^>]*>(.+?)</div>',
+        r'<h2[^>]+class="subtitle"[^>]*>([^<]+)</h2>',
     ]
     _DESCRIPTION_REGEXES = [
         r'<p itemprop="description">\s*(.+?)</p>',
@@ -369,7 +393,9 @@ class ProSiebenSat1IE(ProSiebenSat1BaseIE):
     def _extract_clip(self, url, webpage):
         clip_id = self._html_search_regex(
             self._CLIPID_REGEXES, webpage, 'clip id')
-        title = self._html_search_regex(self._TITLE_REGEXES, webpage, 'title')
+        title = self._html_search_regex(
+            self._TITLE_REGEXES, webpage, 'title',
+            default=None) or self._og_search_title(webpage)
         info = self._extract_video_info(url, clip_id)
         description = self._html_search_regex(
             self._DESCRIPTION_REGEXES, webpage, 'description', default=None)

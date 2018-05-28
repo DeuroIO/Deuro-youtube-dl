@@ -1,15 +1,16 @@
 from __future__ import unicode_literals
 
+import base64
+import json
 import re
 
 from .common import InfoExtractor
 from .theplatform import ThePlatformIE
 from .adobepass import AdobePassIE
-from ..compat import compat_urllib_parse_urlparse
 from ..utils import (
     find_xpath_attr,
-    lowercase_escape,
     smuggle_url,
+    try_get,
     unescapeHTML,
     update_url_query,
     int_or_none,
@@ -17,7 +18,7 @@ from ..utils import (
 
 
 class NBCIE(AdobePassIE):
-    _VALID_URL = r'https?://(?:www\.)?nbc\.com/(?:[^/]+/)+(?P<id>n?\d+)'
+    _VALID_URL = r'https?(?P<permalink>://(?:www\.)?nbc\.com/(?:classic-tv/)?[^/]+/video/[^/]+/(?P<id>n?\d+))'
 
     _TESTS = [
         {
@@ -37,16 +38,6 @@ class NBCIE(AdobePassIE):
             },
         },
         {
-            'url': 'http://www.nbc.com/the-tonight-show/episodes/176',
-            'info_dict': {
-                'id': '176',
-                'ext': 'flv',
-                'title': 'Ricky Gervais, Steven Van Zandt, ILoveMakonnen',
-                'description': 'A brand new episode of The Tonight Show welcomes Ricky Gervais, Steven Van Zandt and ILoveMakonnen.',
-            },
-            'skip': '404 Not Found',
-        },
-        {
             'url': 'http://www.nbc.com/saturday-night-live/video/star-wars-teaser/2832821',
             'info_dict': {
                 'id': '2832821',
@@ -64,11 +55,6 @@ class NBCIE(AdobePassIE):
             'skip': 'Only works from US',
         },
         {
-            # This video has expired but with an escaped embedURL
-            'url': 'http://www.nbc.com/parenthood/episode-guide/season-5/just-like-at-home/515',
-            'only_matching': True,
-        },
-        {
             # HLS streams requires the 'hdnea3' cookie
             'url': 'http://www.nbc.com/Kings/video/goliath/n1806',
             'info_dict': {
@@ -84,73 +70,62 @@ class NBCIE(AdobePassIE):
                 'skip_download': True,
             },
             'skip': 'Only works from US',
-        }
+        },
+        {
+            'url': 'https://www.nbc.com/classic-tv/charles-in-charge/video/charles-in-charge-pilot/n3310',
+            'only_matching': True,
+        },
     ]
 
     def _real_extract(self, url):
-        video_id = self._match_id(url)
-        webpage = self._download_webpage(url, video_id)
-        info = {
-            '_type': 'url_transparent',
-            'ie_key': 'ThePlatform',
-            'id': video_id,
-        }
-        video_data = None
-        preload = self._search_regex(
-            r'PRELOAD\s*=\s*({.+})', webpage, 'preload data', default=None)
-        if preload:
-            preload_data = self._parse_json(preload, video_id)
-            path = compat_urllib_parse_urlparse(url).path.rstrip('/')
-            entity_id = preload_data.get('xref', {}).get(path)
-            video_data = preload_data.get('entities', {}).get(entity_id)
-        if video_data:
-            query = {
-                'mbr': 'true',
-                'manifest': 'm3u',
-            }
-            video_id = video_data['guid']
-            title = video_data['title']
-            if video_data.get('entitlement') == 'auth':
-                resource = self._get_mvpd_resource(
-                    'nbcentertainment', title, video_id,
-                    video_data.get('vChipRating'))
-                query['auth'] = self._extract_mvpd_auth(
-                    url, video_id, 'nbcentertainment', resource)
-            theplatform_url = smuggle_url(update_url_query(
-                'http://link.theplatform.com/s/NnzsPC/media/guid/2410887629/' + video_id,
-                query), {'force_smil_url': True})
-            info.update({
-                'id': video_id,
-                'title': title,
-                'url': theplatform_url,
-                'description': video_data.get('description'),
-                'keywords': video_data.get('keywords'),
-                'season_number': int_or_none(video_data.get('seasonNumber')),
-                'episode_number': int_or_none(video_data.get('episodeNumber')),
-                'series': video_data.get('showName'),
+        permalink, video_id = re.match(self._VALID_URL, url).groups()
+        permalink = 'http' + permalink
+        response = self._download_json(
+            'https://api.nbc.com/v3/videos', video_id, query={
+                'filter[permalink]': permalink,
+                'fields[videos]': 'description,entitlement,episodeNumber,guid,keywords,seasonNumber,title,vChipRating',
+                'fields[shows]': 'shortTitle',
+                'include': 'show.shortTitle',
             })
-        else:
-            theplatform_url = unescapeHTML(lowercase_escape(self._html_search_regex(
-                [
-                    r'(?:class="video-player video-player-full" data-mpx-url|class="player" src)="(.*?)"',
-                    r'<iframe[^>]+src="((?:https?:)?//player\.theplatform\.com/[^"]+)"',
-                    r'"embedURL"\s*:\s*"([^"]+)"'
-                ],
-                webpage, 'theplatform url').replace('_no_endcard', '').replace('\\/', '/')))
-            if theplatform_url.startswith('//'):
-                theplatform_url = 'http:' + theplatform_url
-            info['url'] = smuggle_url(theplatform_url, {'source_url': url})
-        return info
+        video_data = response['data'][0]['attributes']
+        query = {
+            'mbr': 'true',
+            'manifest': 'm3u',
+        }
+        video_id = video_data['guid']
+        title = video_data['title']
+        if video_data.get('entitlement') == 'auth':
+            resource = self._get_mvpd_resource(
+                'nbcentertainment', title, video_id,
+                video_data.get('vChipRating'))
+            query['auth'] = self._extract_mvpd_auth(
+                url, video_id, 'nbcentertainment', resource)
+        theplatform_url = smuggle_url(update_url_query(
+            'http://link.theplatform.com/s/NnzsPC/media/guid/2410887629/' + video_id,
+            query), {'force_smil_url': True})
+        return {
+            '_type': 'url_transparent',
+            'id': video_id,
+            'title': title,
+            'url': theplatform_url,
+            'description': video_data.get('description'),
+            'tags': video_data.get('keywords'),
+            'season_number': int_or_none(video_data.get('seasonNumber')),
+            'episode_number': int_or_none(video_data.get('episodeNumber')),
+            'episode': title,
+            'series': try_get(response, lambda x: x['included'][0]['attributes']['shortTitle']),
+            'ie_key': 'ThePlatform',
+        }
 
 
 class NBCSportsVPlayerIE(InfoExtractor):
     _VALID_URL = r'https?://vplayer\.nbcsports\.com/(?:[^/]+/)+(?P<id>[0-9a-zA-Z_]+)'
 
     _TESTS = [{
-        'url': 'https://vplayer.nbcsports.com/p/BxmELC/nbcsports_share/select/9CsDKds0kvHI',
+        'url': 'https://vplayer.nbcsports.com/p/BxmELC/nbcsports_embed/select/9CsDKds0kvHI',
         'info_dict': {
             'id': '9CsDKds0kvHI',
-            'ext': 'flv',
+            'ext': 'mp4',
             'description': 'md5:df390f70a9ba7c95ff1daace988f0d8d',
             'title': 'Tyler Kalinoski hits buzzer-beater to lift Davidson',
             'timestamp': 1426270238,
@@ -158,7 +133,7 @@ class NBCSportsVPlayerIE(InfoExtractor):
             'uploader': 'NBCU-SPORTS',
         }
     }, {
-        'url': 'http://vplayer.nbcsports.com/p/BxmELC/nbc_embedshare/select/_hqLjQ95yx8Z',
+        'url': 'https://vplayer.nbcsports.com/p/BxmELC/nbcsports_embed/select/media/_hqLjQ95yx8Z',
         'only_matching': True,
     }]
 
@@ -172,7 +147,8 @@ class NBCSportsVPlayerIE(InfoExtractor):
     def _real_extract(self, url):
         video_id = self._match_id(url)
         webpage = self._download_webpage(url, video_id)
-        theplatform_url = self._og_search_video_url(webpage)
+        theplatform_url = self._og_search_video_url(webpage).replace(
+            'vplayer.nbcsports.com', 'player.theplatform.com')
         return self.url_result(theplatform_url, 'ThePlatform')
 
 
@@ -198,6 +174,65 @@ class NBCSportsIE(InfoExtractor):
         webpage = self._download_webpage(url, video_id)
         return self.url_result(
             NBCSportsVPlayerIE._extract_url(webpage), 'NBCSportsVPlayer')
+
+
+class NBCSportsStreamIE(AdobePassIE):
+    _VALID_URL = r'https?://stream\.nbcsports\.com/.+?\bpid=(?P<id>\d+)'
+    _TEST = {
+        'url': 'http://stream.nbcsports.com/nbcsn/generic?pid=206559',
+        'info_dict': {
+            'id': '206559',
+            'ext': 'mp4',
+            'title': 'Amgen Tour of California Women\'s Recap',
+            'description': 'md5:66520066b3b5281ada7698d0ea2aa894',
+        },
+        'params': {
+            # m3u8 download
+            'skip_download': True,
+        },
+        'skip': 'Requires Adobe Pass Authentication',
+    }
+
+    def _real_extract(self, url):
+        video_id = self._match_id(url)
+        live_source = self._download_json(
+            'http://stream.nbcsports.com/data/live_sources_%s.json' % video_id,
+            video_id)
+        video_source = live_source['videoSources'][0]
+        title = video_source['title']
+        source_url = None
+        for k in ('source', 'msl4source', 'iossource', 'hlsv4'):
+            sk = k + 'Url'
+            source_url = video_source.get(sk) or video_source.get(sk + 'Alt')
+            if source_url:
+                break
+        else:
+            source_url = video_source['ottStreamUrl']
+        is_live = video_source.get('type') == 'live' or video_source.get('status') == 'Live'
+        resource = self._get_mvpd_resource('nbcsports', title, video_id, '')
+        token = self._extract_mvpd_auth(url, video_id, 'nbcsports', resource)
+        tokenized_url = self._download_json(
+            'https://token.playmakerservices.com/cdn',
+            video_id, data=json.dumps({
+                'requestorId': 'nbcsports',
+                'pid': video_id,
+                'application': 'NBCSports',
+                'version': 'v1',
+                'platform': 'desktop',
+                'cdn': 'akamai',
+                'url': video_source['sourceUrl'],
+                'token': base64.b64encode(token.encode()).decode(),
+                'resourceId': base64.b64encode(resource.encode()).decode(),
+            }).encode())['tokenizedUrl']
+        formats = self._extract_m3u8_formats(tokenized_url, video_id, 'mp4')
+        self._sort_formats(formats)
+        return {
+            'id': video_id,
+            'title': self._live_title(title) if is_live else title,
+            'description': live_source.get('description'),
+            'formats': formats,
+            'is_live': is_live,
+        }
 
 
 class CSNNEIE(InfoExtractor):
@@ -390,6 +425,7 @@ class NBCNewsIE(ThePlatformIE):
 
 
 class NBCOlympicsIE(InfoExtractor):
+    IE_NAME = 'nbcolympics'
     _VALID_URL = r'https?://www\.nbcolympics\.com/video/(?P<id>[a-z-]+)'
 
     _TEST = {
@@ -426,4 +462,55 @@ class NBCOlympicsIE(InfoExtractor):
             'url': theplatform_url,
             'ie_key': ThePlatformIE.ie_key(),
             'display_id': display_id,
+        }
+
+
+class NBCOlympicsStreamIE(AdobePassIE):
+    IE_NAME = 'nbcolympics:stream'
+    _VALID_URL = r'https?://stream\.nbcolympics\.com/(?P<id>[0-9a-z-]+)'
+    _TEST = {
+        'url': 'http://stream.nbcolympics.com/2018-winter-olympics-nbcsn-evening-feb-8',
+        'info_dict': {
+            'id': '203493',
+            'ext': 'mp4',
+            'title': 're:Curling, Alpine, Luge [0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}$',
+        },
+        'params': {
+            # m3u8 download
+            'skip_download': True,
+        },
+    }
+    _DATA_URL_TEMPLATE = 'http://stream.nbcolympics.com/data/%s_%s.json'
+
+    def _real_extract(self, url):
+        display_id = self._match_id(url)
+        webpage = self._download_webpage(url, display_id)
+        pid = self._search_regex(r'pid\s*=\s*(\d+);', webpage, 'pid')
+        resource = self._search_regex(
+            r"resource\s*=\s*'(.+)';", webpage,
+            'resource').replace("' + pid + '", pid)
+        event_config = self._download_json(
+            self._DATA_URL_TEMPLATE % ('event_config', pid),
+            pid)['eventConfig']
+        title = self._live_title(event_config['eventTitle'])
+        source_url = self._download_json(
+            self._DATA_URL_TEMPLATE % ('live_sources', pid),
+            pid)['videoSources'][0]['sourceUrl']
+        media_token = self._extract_mvpd_auth(
+            url, pid, event_config.get('requestorId', 'NBCOlympics'), resource)
+        formats = self._extract_m3u8_formats(self._download_webpage(
+            'http://sp.auth.adobe.com/tvs/v1/sign', pid, query={
+                'cdn': 'akamai',
+                'mediaToken': base64.b64encode(media_token.encode()),
+                'resource': base64.b64encode(resource.encode()),
+                'url': source_url,
+            }), pid, 'mp4')
+        self._sort_formats(formats)
+
+        return {
+            'id': pid,
+            'display_id': display_id,
+            'title': title,
+            'formats': formats,
+            'is_live': True,
         }
