@@ -118,6 +118,10 @@ from .bilibili import (
     BiliBiliBangumiIE,
 )
 from .biobiochiletv import BioBioChileTVIE
+from .bitchute import (
+    BitChuteIE,
+    BitChuteChannelIE,
+)
 from .biqle import BIQLEIE
 from .bleacherreport import (
     BleacherReportIE,
@@ -895,7 +899,10 @@ from .rai import (
     RaiPlayPlaylistIE,
     RaiIE,
 )
-from .raywenderlich import RayWenderlichIE
+from .raywenderlich import (
+    RayWenderlichIE,
+    RayWenderlichCourseIE,
+)
 from .rbmaradio import RBMARadioIE
 from .rds import RDSIE
 from .redbulltv import RedBullTVIE
