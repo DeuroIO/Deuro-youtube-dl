@@ -32,7 +32,6 @@ from ..utils import (
     unified_strdate,
     unsmuggle_url,
     UnsupportedError,
-    url_or_none,
     xpath_text,
 )
 from .commonprotocols import RtmpIE
@@ -114,6 +113,7 @@ from .indavideo import IndavideoEmbedIE
 from .apa import APAIE
 from .foxnews import FoxNewsIE
 from .viqeo import ViqeoIE
+from .expressen import ExpressenIE
 
 
 class GenericIE(InfoExtractor):
@@ -2070,6 +2070,21 @@ class GenericIE(InfoExtractor):
             },
             'playlist_count': 6,
         },
+        {
+            # videojs embed
+            'url': 'https://video.sibnet.ru/shell.php?videoid=3422904',
+            'info_dict': {
+                'id': 'shell',
+                'ext': 'mp4',
+                'title': 'Доставщик пиццы спросил разрешения сыграть на фортепиано',
+                'description': 'md5:89209cdc587dab1e4a090453dbaa2cb1',
+                'thumbnail': r're:^https?://.*\.jpg$',
+            },
+            'params': {
+                'skip_download': True,
+            },
+            'expected_warnings': ['Failed to download MPD manifest'],
+        },
         # {
         #     # TODO: find another test
         #     # http://schema.org/VideoObject
@@ -3109,6 +3124,11 @@ class GenericIE(InfoExtractor):
             return self.playlist_from_matches(
                 viqeo_urls, video_id, video_title, ie=ViqeoIE.ie_key())
 
+        expressen_urls = ExpressenIE._extract_urls(webpage)
+        if expressen_urls:
+            return self.playlist_from_matches(
+                expressen_urls, video_id, video_title, ie=ExpressenIE.ie_key())
+
         # Look for HTML5 media
         entries = self._parse_html5_media_entries(url, webpage, video_id, m3u8_id='hls')
         if entries:
@@ -3146,8 +3166,8 @@ class GenericIE(InfoExtractor):
                 sources = [sources]
             formats = []
             for source in sources:
-                src = url_or_none(source.get('src'))
-                if not src:
+                src = source.get('src')
+                if not src or not isinstance(src, compat_str):
                     continue
                 src = compat_urlparse.urljoin(url, src)
                 src_type = source.get('type')

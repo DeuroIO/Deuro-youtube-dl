@@ -520,6 +520,7 @@ from .keezmovies import KeezMoviesIE
 from .ketnet import KetnetIE
 from .khanacademy import KhanAcademyIE
 from .kickstarter import KickStarterIE
+from .kinopoisk import KinoPoiskIE
 from .keek import KeekIE
 from .konserthusetplay import KonserthusetPlayIE
 from .kontrtube import KontrTubeIE
@@ -740,7 +741,10 @@ from .nonktube import NonkTubeIE
 from .noovo import NoovoIE
 from .normalboots import NormalbootsIE
 from .nosvideo import NosVideoIE
-from .nova import NovaIE
+from .nova import (
+    NovaEmbedIE,
+    NovaIE,
+)
 from .novamov import (
     AuroraVidIE,
     CloudTimeIE,
@@ -1177,6 +1181,7 @@ from .tvp import (
 from .tvplay import (
     TVPlayIE,
     ViafreeIE,
+    TVPlayHomeIE,
 )
 from .tvplayer import TVPlayerIE
 from .tweakers import TweakersIE
@@ -1424,6 +1429,7 @@ from .younow import (
     YouNowMomentIE,
 )
 from .youporn import YouPornIE
+from .yourporn import YourPornIE
 from .yourupload import YourUploadIE
 from .youtube import (
     YoutubeIE,
