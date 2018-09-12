@@ -1,3 +1,41 @@
+version 2018.09.10
+
+Core
++ [utils] Properly recognize AV1 codec (#17506)
+
+Extractors
++ [iprima] Add support for prima.iprima.cz (#17514)
++ [tele5] Add support for tele5.de (#7805, #7922, #17331, #17414)
+* [nbc] Fix extraction of percent encoded URLs (#17374)
+
+
+version 2018.09.08
+
+Extractors
+* [youtube] Fix extraction (#17457, #17464)
++ [pornhub:uservideos] Add support for new URLs (#17388)
+* [iprima] Confirm adult check (#17437)
+* [slideslive] Make check for video service name case-insensitive (#17429)
+* [radiojavan] Fix extraction (#17151)
+* [generic] Skip unsuccessful jwplayer extraction (#16735)
+
+
+version 2018.09.01
+
+Core
+* [utils] Skip remote IP addresses non matching to source address' IP version
+  when creating a connection (#13422, #17362)
+
+Extractors
++ [ard] Add support for one.ard.de (#17397)
+* [niconico] Fix extraction on python3 (#17393, #17407)
+* [ard] Extract f4m formats
+* [crunchyroll] Parse vilos media data (#17343)
++ [ard] Add support for Beta ARD Mediathek
++ [bandcamp] Extract more metadata (#13197)
+* [internazionale] Fix extraction of non-available-abroad videos (#17386)
+
+
 version 2018.08.28
 
 Extractors

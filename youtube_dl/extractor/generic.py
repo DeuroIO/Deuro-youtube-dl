@@ -3112,7 +3112,7 @@ class GenericIE(InfoExtractor):
             return self.playlist_from_matches(
                 foxnews_urls, video_id, video_title, ie=FoxNewsIE.ie_key())
 
-        sharevideos_urls = [mobj.group('url') for mobj in re.finditer(
+        sharevideos_urls = [sharevideos_mobj.group('url') for sharevideos_mobj in re.finditer(
             r'<iframe[^>]+?\bsrc\s*=\s*(["\'])(?P<url>(?:https?:)?//embed\.share-videos\.se/auto/embed/\d+\?.*?\buid=\d+.*?)\1',
             webpage)]
         if sharevideos_urls:
@@ -3150,9 +3150,13 @@ class GenericIE(InfoExtractor):
         jwplayer_data = self._find_jwplayer_data(
             webpage, video_id, transform_source=js_to_json)
         if jwplayer_data:
-            info = self._parse_jwplayer_data(
-                jwplayer_data, video_id, require_title=False, base_url=url)
-            return merge_dicts(info, info_dict)
+            try:
+                info = self._parse_jwplayer_data(
+                    jwplayer_data, video_id, require_title=False, base_url=url)
+                return merge_dicts(info, info_dict)
+            except ExtractorError:
+                # See https://github.com/rg3/youtube-dl/pull/16735
+                pass
 
         # Video.js embed
         mobj = re.search(
